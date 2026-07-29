@@ -33,8 +33,8 @@ REQUEST_TIMEOUT_SECONDS = 15
 
 # --- Rate limit (free tier: 5 requests/minute) ---
 # 60 seconds / 5 requests = 12s minimum between requests.
-# We add 1s buffer to be safe.
-RATE_LIMIT_SLEEP = 13
+# We add extra margin to reduce 429s during normal pagination.
+RATE_LIMIT_SLEEP = 15
 
 # --- PostgreSQL connection settings ---
 DB_HOST = os.getenv("DB_HOST", "localhost")

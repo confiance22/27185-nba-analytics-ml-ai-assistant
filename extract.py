@@ -55,6 +55,12 @@ def fetch_from_api(url: str, params: dict | None = None) -> dict:
     - Attempt 2 fails -> wait 2s -> Attempt 3
     - Attempt 3 fails -> wait 4s -> give up, raise ExtractError
 
+    Special case — HTTP 429 (Too Many Requests):
+    The free tier allows 5 requests per minute. If we hit 429, the
+    normal 1s/2s/4s backoff is useless because the quota won't reset
+    that fast. Instead we wait 60s (or whatever the Retry-After header
+    says, plus 1s buffer) before retrying.
+
     This handles a BRIEF network blip (wifi hiccup, API momentarily
     busy) without hammering the server immediately again and again.
     It deliberately does NOT retry forever — a real outage should
@@ -81,10 +87,29 @@ def fetch_from_api(url: str, params: dict | None = None) -> dict:
             logger.warning(f"Connection error on attempt {attempt} "
                            f"(no internet or API unreachable)")
         except requests.exceptions.HTTPError as e:
-            # HTTP errors (like 401, 500) are unlikely to be fixed by
-            # retrying, but we still retry a couple of times in case
-            # it's a transient 5xx from the server.
-            logger.warning(f"HTTP error on attempt {attempt}: {e}")
+            if e.response is not None and e.response.status_code == 429:
+                # Rate-limited: the normal 1s/2s/4s backoff won't help
+                # because the quota needs a full minute to reset.
+                retry_after = e.response.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        wait = int(retry_after) + 1
+                    except (ValueError, TypeError):
+                        wait = 60
+                else:
+                    wait = 60
+                logger.warning(
+                    f"Rate limited (429). Waiting {wait}s "
+                    f"for quota to reset (attempt {attempt}/"
+                    f"{MAX_RETRIES})..."
+                )
+                time.sleep(wait)
+                continue  # skip the normal exponential-backoff sleep
+            else:
+                # HTTP errors (like 401, 500) are unlikely to be fixed
+                # by retrying, but we still retry a couple of times in
+                # case it's a transient 5xx from the server.
+                logger.warning(f"HTTP error on attempt {attempt}: {e}")
         except ValueError:
             # response.json() failed to parse — server sent bad data
             logger.warning(f"Could not parse JSON response on attempt {attempt}")

@@ -1,27 +1,12 @@
 """
-db.py
+database/db.py
 
-Handles the Snowflake connection and raw/cleaned table creation.
-
-Snowflake differences from Postgres that affect this module:
-  - VARIANT instead of JSONB for semi-structured data.
-    VARIANT is Snowflake's native type for JSON/Parquet/XML and supports
-    path traversal with colon notation (raw_data:field_name::STRING).
-  - IDENTITY(1,1) instead of SERIAL for auto-increment columns.
-  - CURRENT_TIMESTAMP() instead of NOW().
-  - MERGE instead of INSERT ... ON CONFLICT for upserts (used in
-    load_cleaned.py).
-
-Proxy note:
-  The Snowflake Python connector performs OCSP certificate checks on
-  import and connect, which hang if HTTP_PROXY is set. We exclude
-  Snowflake's OCSP endpoint from the proxy to avoid this.
+Snowflake connection and table creation. Excludes Snowflake hosts from
+the proxy so OCSP checks and the actual connection don't get blocked.
 """
 
 import os
 
-# Bypass proxy for Snowflake (OCSP checks + the actual server connection)
-# so the proxy doesn't interfere with Snowflake's SSL handshake.
 _snowflake_hosts = "ocsp.snowflakecomputing.com,.snowflakecomputing.com"
 _existing = os.environ.get("NO_PROXY", "")
 if _existing:
@@ -32,7 +17,7 @@ else:
 import snowflake.connector
 from snowflake.connector.errors import Error as SnowflakeError
 
-from config import (
+from config.settings import (
     SNOWFLAKE_ACCOUNT,
     SNOWFLAKE_USER,
     SNOWFLAKE_PASSWORD,
@@ -40,13 +25,12 @@ from config import (
     SNOWFLAKE_DATABASE,
     SNOWFLAKE_SCHEMA,
 )
-from logging_setup import get_logger
+from etl.logging_setup import get_logger
 
 logger = get_logger(__name__)
 
 
 class DatabaseError(Exception):
-    """Raised for connection failures or table lock issues."""
     pass
 
 
@@ -73,7 +57,6 @@ def get_connection():
 
 
 def _ensure_database(conn):
-    """Create the database and schema if they don't exist yet."""
     with conn.cursor() as cur:
         cur.execute(f"CREATE DATABASE IF NOT EXISTS {SNOWFLAKE_DATABASE};")
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA};")
@@ -81,13 +64,6 @@ def _ensure_database(conn):
 
 
 def init_raw_tables(conn):
-    """
-    Creates raw_teams and raw_games tables if they don't exist.
-
-    Uses VARIANT (Snowflake's semi-structured type) instead of Postgres's
-    JSONB. IDENTITY(1,1) replaces SERIAL for auto-increment, and
-    CURRENT_TIMESTAMP() replaces NOW().
-    """
     _ensure_database(conn)
     with conn.cursor() as cur:
         cur.execute("""
@@ -97,7 +73,6 @@ def init_raw_tables(conn):
                 loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
             );
         """)
-
         cur.execute("""
             CREATE TABLE IF NOT EXISTS raw_games (
                 id INTEGER IDENTITY(1,1) PRIMARY KEY,
@@ -122,7 +97,6 @@ def init_cleaned_tables(conn):
                 division VARCHAR NOT NULL
             );
         """)
-
         cur.execute("""
             CREATE TABLE IF NOT EXISTS cleaned_games (
                 game_id INTEGER PRIMARY KEY,

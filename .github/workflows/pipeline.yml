@@ -32,13 +32,16 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run extract
-        run: python extract.py
+        run: python -m etl.extract
 
       - name: Load raw data
-        run: python load_raw.py
+        run: python -m etl.load
 
       - name: Run transform (sanity check)
-        run: python transform.py
+        run: python -m etl.transform
 
       - name: Load cleaned data
-        run: python load_cleaned.py
+        run: python -m etl.load
+
+      - name: Run tests
+        run: pytest tests/ -v

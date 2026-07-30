@@ -45,3 +45,15 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/27185-nba-analytics-ml-ai-assistant
+            git pull
+            source venv/bin/activate
+            pip install -r requirements.txt

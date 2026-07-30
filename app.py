@@ -8,15 +8,17 @@ app = Flask(__name__)
 HTML = """
 <!DOCTYPE html>
 <html>
-<head><title>NBA AI Assistant</title></head>
-<body style="font-family:sans-serif;max-width:700px;margin:40px auto;padding:20px">
-<h1>NBA Data AI Assistant</h1>
-{error}
-<form method="post">
-  <input name="q" style="width:80%;padding:8px" placeholder="Ask about NBA teams and games...">
-  <button type="submit" style="padding:8px 16px">Ask</button>
-</form>
-{answer}
+<head>
+  <title>NBA AI Assistant</title>
+</head>
+<body style="font-family:Arial;max-width:600px;margin:50px auto;padding:20px">
+  <h2>NBA Data AI Assistant</h2>
+  <form method="post">
+    <input name="q" style="width:75%;padding:8px" placeholder="Ask about NBA teams and games..." required>
+    <button type="submit" style="padding:8px 14px">Ask</button>
+  </form>
+  {error}
+  {answer}
 </body>
 </html>
 """

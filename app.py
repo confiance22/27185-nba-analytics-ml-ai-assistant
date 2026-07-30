@@ -58,7 +58,7 @@ def home():
                 answer = f'<div class="answer">{ask(q)}</div>'
             except Exception as e:
                 error = f'<div class="error">Error: {e}</div>'
-    return HTML.format(answer=answer, error=error)
+    return HTML.replace("{error}", error).replace("{answer}", answer)
 
 
 @app.route("/api", methods=["POST"])

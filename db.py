@@ -1,19 +1,45 @@
 """
 db.py
 
-Handles the PostgreSQL connection and raw-layer table creation.
+Handles the Snowflake connection and raw/cleaned table creation.
 
-Why a separate raw layer?
-- raw_teams and raw_games store every JSON object exactly as the API
-  returned it — no parsing, no renaming, no type coercion.
-- If your cleaning logic has a bug or you change your transform rules
-  later, you can re-derive everything from raw without calling the API
-  again. This is your safety net.
+Snowflake differences from Postgres that affect this module:
+  - VARIANT instead of JSONB for semi-structured data.
+    VARIANT is Snowflake's native type for JSON/Parquet/XML and supports
+    path traversal with colon notation (raw_data:field_name::STRING).
+  - IDENTITY(1,1) instead of SERIAL for auto-increment columns.
+  - CURRENT_TIMESTAMP() instead of NOW().
+  - MERGE instead of INSERT ... ON CONFLICT for upserts (used in
+    load_cleaned.py).
+
+Proxy note:
+  The Snowflake Python connector performs OCSP certificate checks on
+  import and connect, which hang if HTTP_PROXY is set. We exclude
+  Snowflake's OCSP endpoint from the proxy to avoid this.
 """
 
-import psycopg2
+import os
 
-from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+# Bypass proxy for Snowflake (OCSP checks + the actual server connection)
+# so the proxy doesn't interfere with Snowflake's SSL handshake.
+_snowflake_hosts = "ocsp.snowflakecomputing.com,.snowflakecomputing.com"
+_existing = os.environ.get("NO_PROXY", "")
+if _existing:
+    os.environ["NO_PROXY"] = f"{_existing},{_snowflake_hosts}"
+else:
+    os.environ["NO_PROXY"] = _snowflake_hosts
+
+import snowflake.connector
+from snowflake.connector.errors import Error as SnowflakeError
+
+from config import (
+    SNOWFLAKE_ACCOUNT,
+    SNOWFLAKE_USER,
+    SNOWFLAKE_PASSWORD,
+    SNOWFLAKE_WAREHOUSE,
+    SNOWFLAKE_DATABASE,
+    SNOWFLAKE_SCHEMA,
+)
 from logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -25,50 +51,58 @@ class DatabaseError(Exception):
 
 
 def get_connection():
-    if not all([DB_NAME, DB_USER, DB_PASSWORD]):
+    if not all([SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD]):
         raise DatabaseError(
-            "Missing DB credentials. Check that your .env file has "
-            "DB_NAME, DB_USER, and DB_PASSWORD set."
+            "Missing Snowflake credentials. Check that your .env file has "
+            "SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, and SNOWFLAKE_PASSWORD set."
         )
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            connect_timeout=10,
+        conn = snowflake.connector.connect(
+            account=SNOWFLAKE_ACCOUNT,
+            user=SNOWFLAKE_USER,
+            password=SNOWFLAKE_PASSWORD,
+            warehouse=SNOWFLAKE_WAREHOUSE,
+            database=SNOWFLAKE_DATABASE,
+            schema=SNOWFLAKE_SCHEMA,
+            login_timeout=10,
         )
         return conn
-    except psycopg2.OperationalError as e:
-        # Covers: wrong password, DB not running, network unreachable,
-        # or the target table/row is locked by another session.
-        logger.error(f"Could not connect to the database: {e}")
+    except SnowflakeError as e:
+        logger.error(f"Could not connect to Snowflake: {e}")
         raise DatabaseError(f"Database connection failed: {e}") from e
+
+
+def _ensure_database(conn):
+    """Create the database and schema if they don't exist yet."""
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE DATABASE IF NOT EXISTS {SNOWFLAKE_DATABASE};")
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA};")
+    conn.commit()
 
 
 def init_raw_tables(conn):
     """
-    Creates raw_teams and raw_games tables if they don't already exist.
+    Creates raw_teams and raw_games tables if they don't exist.
 
-    Uses IF NOT EXISTS so running this repeatedly is safe (idempotent).
-    Each row stores exactly one JSON object from the API as a JSONB
-    column — no parsing or flattening happens at this layer.
+    Uses VARIANT (Snowflake's semi-structured type) instead of Postgres's
+    JSONB. IDENTITY(1,1) replaces SERIAL for auto-increment, and
+    CURRENT_TIMESTAMP() replaces NOW().
     """
+    _ensure_database(conn)
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS raw_teams (
-                id SERIAL PRIMARY KEY,
-                raw_data JSONB NOT NULL,
-                loaded_at TIMESTAMP DEFAULT NOW()
+                id INTEGER IDENTITY(1,1) PRIMARY KEY,
+                raw_data VARIANT NOT NULL,
+                loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
             );
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS raw_games (
-                id SERIAL PRIMARY KEY,
-                raw_data JSONB NOT NULL,
-                loaded_at TIMESTAMP DEFAULT NOW()
+                id INTEGER IDENTITY(1,1) PRIMARY KEY,
+                raw_data VARIANT NOT NULL,
+                loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
             );
         """)
     conn.commit()
@@ -76,27 +110,16 @@ def init_raw_tables(conn):
 
 
 def init_cleaned_tables(conn):
-    """
-    Creates cleaned_teams and cleaned_games tables if they don't exist.
-
-    cleaned_teams uses the team_id from the API as its PRIMARY KEY so
-    that ON CONFLICT DO UPDATE / DO NOTHING works naturally.
-
-    cleaned_games has foreign-key references to cleaned_teams.team_id
-    so Postgres itself enforces that every game references a real team.
-    The game_id is the PRIMARY KEY, which is what ON CONFLICT uses
-    during the incremental game load.
-    """
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS cleaned_teams (
                 team_id INTEGER PRIMARY KEY,
-                city TEXT NOT NULL DEFAULT '',
-                name TEXT NOT NULL,
-                full_name TEXT NOT NULL,
-                abbreviation TEXT NOT NULL DEFAULT '',
-                conference TEXT NOT NULL,
-                division TEXT NOT NULL
+                city VARCHAR NOT NULL DEFAULT '',
+                name VARCHAR NOT NULL,
+                full_name VARCHAR NOT NULL,
+                abbreviation VARCHAR NOT NULL DEFAULT '',
+                conference VARCHAR NOT NULL,
+                division VARCHAR NOT NULL
             );
         """)
 
@@ -106,10 +129,8 @@ def init_cleaned_tables(conn):
                 date DATE NOT NULL,
                 season INTEGER NOT NULL,
                 postseason BOOLEAN NOT NULL DEFAULT FALSE,
-                home_team_id INTEGER NOT NULL
-                    REFERENCES cleaned_teams(team_id),
-                visitor_team_id INTEGER NOT NULL
-                    REFERENCES cleaned_teams(team_id),
+                home_team_id INTEGER NOT NULL,
+                visitor_team_id INTEGER NOT NULL,
                 home_team_score INTEGER NOT NULL,
                 visitor_team_score INTEGER NOT NULL,
                 home_win INTEGER NOT NULL

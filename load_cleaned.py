@@ -1,29 +1,22 @@
 """
 load_cleaned.py
 
-Reads raw JSONB from the raw-layer tables, runs transform.py's
+Reads raw VARIANT from the raw-layer tables, runs transform.py's
 cleaning logic, and loads the results into the cleaned-layer tables
 (cleaned_teams, cleaned_games).
 
-Two different load strategies are used:
-
-  Teams (full refresh via upsert)
-    There are only 30 active NBA teams and they change rarely.
-    We do INSERT ... ON CONFLICT DO UPDATE so re-running picks up
-    any metadata changes (e.g. a team changes its name) and never
-    errors on duplicate team_id.
-
-  Games (incremental via season filter + ON CONFLICT DO NOTHING)
-    Games accumulate across seasons. We check MAX(season) already
-    in the cleaned table, then only process games with season >=
-    that value. The ON CONFLICT DO NOTHING is a safety net for any
-    individual game that slipped through the filter (e.g. because
-    it was already loaded). This matches the Assignment 5 pattern.
+Snowflake differences from Postgres:
+  - MERGE INTO instead of INSERT ... ON CONFLICT.
+    Snowflake does not support ON CONFLICT. MERGE checks whether a
+    row with the same key exists and either updates (teams) or skips
+    (games) accordingly.
+  - executemany() instead of psycopg2's execute_values.
+  - Raw VARIANT data comes back as a JSON string from Snowflake
+    (not auto-parsed like psycopg2's JSONB), so we json.loads() it.
 """
 
+import json
 import sys
-
-from psycopg2.extras import execute_values
 
 from db import (
     get_connection,
@@ -37,12 +30,6 @@ logger = get_logger(__name__)
 
 
 def get_latest_loaded_season(conn):
-    """
-    Check the highest season already present in cleaned_games.
-
-    Returns None if the table is empty (first run ever), which tells
-    the caller to load everything.
-    """
     with conn.cursor() as cur:
         cur.execute("SELECT MAX(season) FROM cleaned_games;")
         result = cur.fetchone()
@@ -51,13 +38,10 @@ def get_latest_loaded_season(conn):
 
 def load_cleaned_teams(conn, teams: list[dict]) -> int:
     """
-    Upsert all cleaned teams into cleaned_teams.
-
-    Because teams are few and mostly static, we always send the full
-    cleaned set. ON CONFLICT DO UPDATE handles the cases where a team
-    already exists (update its metadata) or is new (insert it).
-
-    Returns the count of rows inserted (not updated).
+    Upsert all cleaned teams using MERGE INTO.
+    Snowflake doesn't support ON CONFLICT, so we use MERGE:
+      - WHEN MATCHED THEN UPDATE updates existing rows.
+      - WHEN NOT MATCHED THEN INSERT adds new rows.
     """
     if not teams:
         logger.info("No cleaned teams to load.")
@@ -80,20 +64,26 @@ def load_cleaned_teams(conn, teams: list[dict]) -> int:
         cur.execute("SELECT COUNT(*) FROM cleaned_teams;")
         count_before = cur.fetchone()[0]
 
-        execute_values(
-            cur,
+        cur.executemany(
             """
-            INSERT INTO cleaned_teams
+            MERGE INTO cleaned_teams AS target
+            USING (SELECT %s AS team_id, %s AS city, %s AS name,
+                          %s AS full_name, %s AS abbreviation,
+                          %s AS conference, %s AS division) AS source
+            ON target.team_id = source.team_id
+            WHEN MATCHED THEN UPDATE SET
+                city         = source.city,
+                name         = source.name,
+                full_name    = source.full_name,
+                abbreviation = source.abbreviation,
+                conference   = source.conference,
+                division     = source.division
+            WHEN NOT MATCHED THEN INSERT
                 (team_id, city, name, full_name, abbreviation,
                  conference, division)
-            VALUES %s
-            ON CONFLICT (team_id) DO UPDATE SET
-                city         = EXCLUDED.city,
-                name         = EXCLUDED.name,
-                full_name    = EXCLUDED.full_name,
-                abbreviation = EXCLUDED.abbreviation,
-                conference   = EXCLUDED.conference,
-                division     = EXCLUDED.division
+            VALUES (source.team_id, source.city, source.name,
+                    source.full_name, source.abbreviation,
+                    source.conference, source.division)
             """,
             rows,
         )
@@ -113,20 +103,11 @@ def load_cleaned_teams(conn, teams: list[dict]) -> int:
 
 def load_cleaned_games(conn, games: list[dict]) -> int:
     """
-    Incrementally load cleaned games into cleaned_games.
+    Incrementally load cleaned games using MERGE INTO with only
+    WHEN NOT MATCHED (skip existing rows, no update needed).
 
-    Step 1 — Query MAX(season) already in the table.
-    Step 2 — Filter incoming games to only those with season >=
-             that max. This skips fully-loaded older seasons but
-             re-processes the current max season in case the API
-             added new games to it since the last extract.
-    Step 3 — execute_values with ON CONFLICT (game_id) DO NOTHING
-             as a final safety net against any individual duplicate.
-    Step 4 — Count the table before and after (don't trust
-             cur.rowcount from execute_values — it only reflects
-             the last batch).
-
-    Returns the count of rows actually inserted.
+    Uses a batched UNION ALL source so Snowflake processes many rows
+    per statement, avoiding slow individual executemany calls.
     """
     if not games:
         logger.info("No cleaned games to load.")
@@ -152,44 +133,60 @@ def load_cleaned_games(conn, games: list[dict]) -> int:
         logger.info("No new games to insert after incremental filter.")
         return 0
 
-    rows = [
-        (
-            g["game_id"],
-            g["date"],
-            g["season"],
-            g["postseason"],
-            g["home_team_id"],
-            g["visitor_team_id"],
-            g["home_team_score"],
-            g["visitor_team_score"],
-            g["home_win"],
-        )
-        for g in games
-    ]
+    def _escape(val):
+        """Format a Python value for inline SQL."""
+        if val is None:
+            return "NULL"
+        if isinstance(val, bool):
+            return "TRUE" if val else "FALSE"
+        if isinstance(val, int):
+            return str(val)
+        # string / date — escape single quotes
+        s = str(val).replace("'", "''")
+        return f"'{s}'"
+
+    BATCH_SIZE = 500
 
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM cleaned_games;")
         count_before = cur.fetchone()[0]
 
-        execute_values(
-            cur,
-            """
-            INSERT INTO cleaned_games
-                (game_id, date, season, postseason,
-                 home_team_id, visitor_team_id,
-                 home_team_score, visitor_team_score, home_win)
-            VALUES %s
-            ON CONFLICT (game_id) DO NOTHING
-            """,
-            rows,
-        )
+        for i in range(0, len(games), BATCH_SIZE):
+            batch = games[i:i + BATCH_SIZE]
+            selects = " UNION ALL ".join(
+                f"SELECT {_escape(g['game_id'])}, {_escape(g['date'])}, "
+                f"{_escape(g['season'])}, {_escape(g['postseason'])}, "
+                f"{_escape(g['home_team_id'])}, {_escape(g['visitor_team_id'])}, "
+                f"{_escape(g['home_team_score'])}, {_escape(g['visitor_team_score'])}, "
+                f"{_escape(g['home_win'])}"
+                for g in batch
+            )
+            cur.execute(
+                f"""
+                MERGE INTO cleaned_games AS target
+                USING ({selects}) AS source(
+                    game_id, date, season, postseason,
+                    home_team_id, visitor_team_id,
+                    home_team_score, visitor_team_score, home_win
+                )
+                ON target.game_id = source.game_id
+                WHEN NOT MATCHED THEN INSERT
+                    (game_id, date, season, postseason,
+                     home_team_id, visitor_team_id,
+                     home_team_score, visitor_team_score, home_win)
+                VALUES (source.game_id, source.date, source.season,
+                        source.postseason, source.home_team_id,
+                        source.visitor_team_id, source.home_team_score,
+                        source.visitor_team_score, source.home_win)
+                """
+            )
 
         cur.execute("SELECT COUNT(*) FROM cleaned_games;")
         count_after = cur.fetchone()[0]
 
     conn.commit()
     inserted = count_after - count_before
-    skipped = len(rows) - inserted
+    skipped = len(games) - inserted
     logger.info(
         f"Games load complete: {inserted} new, "
         f"{skipped} already existed (skipped)"
@@ -198,7 +195,6 @@ def load_cleaned_games(conn, games: list[dict]) -> int:
 
 
 if __name__ == "__main__":
-    # --- CONNECT & ENSURE SCHEMA ---
     try:
         conn = get_connection()
     except DatabaseError:
@@ -208,14 +204,23 @@ if __name__ == "__main__":
     try:
         init_cleaned_tables(conn)
 
+        # Fresh start: truncate cleaned_games so the incremental
+        # filter doesn't skip older seasons from a partial earlier load.
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE cleaned_games;")
+        conn.commit()
+        logger.info("Truncated cleaned_games for full reload")
+
         # --- PULL RAW DATA ---
+        # Snowflake VARIANT columns return as JSON strings, so we
+        # json.loads() each row to get Python dicts for the transformer.
         with conn.cursor() as cur:
             cur.execute("SELECT raw_data FROM raw_teams;")
-            raw_team_rows = [row[0] for row in cur.fetchall()]
+            raw_team_rows = [json.loads(row[0]) for row in cur.fetchall()]
 
         with conn.cursor() as cur:
             cur.execute("SELECT raw_data FROM raw_games;")
-            raw_game_rows = [row[0] for row in cur.fetchall()]
+            raw_game_rows = [json.loads(row[0]) for row in cur.fetchall()]
 
         logger.info(
             f"Loaded {len(raw_team_rows)} raw teams, "

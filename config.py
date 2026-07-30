@@ -36,9 +36,12 @@ REQUEST_TIMEOUT_SECONDS = 15
 # We add extra margin to reduce 429s during normal pagination.
 RATE_LIMIT_SLEEP = 15
 
-# --- PostgreSQL connection settings ---
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
+# --- Snowflake connection settings ---
+# Snowflake needs an account identifier (e.g. "xy12345.us-east-1"),
+# a user, password, warehouse, database, and schema.
+SNOWFLAKE_ACCOUNT = os.getenv("SNOWFLAKE_ACCOUNT")
+SNOWFLAKE_USER = os.getenv("SNOWFLAKE_USER")
+SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD")
+SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE")
+SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE", "NBA_PROJECT")
+SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC")

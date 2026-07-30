@@ -225,15 +225,17 @@ if __name__ == "__main__":
 
     try:
         # --- Pull raw_teams ---
+        # Snowflake VARIANT returns JSON strings, so we json.loads()
+        # each row to get Python dicts for the validation functions.
         with conn.cursor() as cur:
             cur.execute("SELECT raw_data FROM raw_teams;")
-            raw_team_rows = [row[0] for row in cur.fetchall()]
+            raw_team_rows = [json.loads(row[0]) for row in cur.fetchall()]
         logger.info(f"Loaded {len(raw_team_rows)} raw team rows from DB")
 
         # --- Pull raw_games ---
         with conn.cursor() as cur:
             cur.execute("SELECT raw_data FROM raw_games;")
-            raw_game_rows = [row[0] for row in cur.fetchall()]
+            raw_game_rows = [json.loads(row[0]) for row in cur.fetchall()]
         logger.info(f"Loaded {len(raw_game_rows)} raw game rows from DB")
 
         # --- Transform ---

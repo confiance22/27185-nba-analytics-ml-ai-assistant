@@ -3,6 +3,8 @@ models/features.py
 
 Builds a no-leakage feature-engineered dataset for predicting home_win.
 Features for a given game use ONLY information from games before that date.
+
+Day 6: implemented rolling win-rate features for both home and visitor teams.
 """
 
 import sys

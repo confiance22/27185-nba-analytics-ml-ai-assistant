@@ -4,6 +4,9 @@ models/train.py
 Trains Logistic Regression and Random Forest on the feature dataset,
 evaluates on a held-out test set, performs a depth-sweep overfitting
 check, and persists both models.
+
+Day 7: fit both classifiers on the feature set, evaluated on a test
+split, and saved the trained models to saved_models/.
 """
 
 import sys

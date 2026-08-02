@@ -4,6 +4,9 @@ models/predict.py
 Exports two CSV files for Tableau:
   1. games_full.csv — every game with team names/conferences/divisions
   2. predictions_vs_actual.csv — LR predictions on every historical game
+
+Day 8: exported the full games dataset and LR predictions to CSV for
+the Tableau dashboard.
 """
 
 import sys

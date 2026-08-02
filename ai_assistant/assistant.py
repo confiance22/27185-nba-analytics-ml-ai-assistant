@@ -3,6 +3,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# Day 10: AI Assistant — natural language NBA question answering via Groq.
 import re
 import snowflake.connector
 import requests
@@ -170,6 +171,10 @@ def run_sql_safely(sql):
 
 def ask(question):
     try:
+        creator_keywords = ("who created", "who made", "who built", "who developed",
+                            "who is your creator", "who is your developer", "who are you")
+        if any(k in question.lower() for k in creator_keywords):
+            return "I was created by Confiance UFITAMAHORO as part of a final project on NBA data analytics."
         sql = question_to_sql(question)
         if sql == "UNANSWERABLE":
             return (

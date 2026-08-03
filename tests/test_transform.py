@@ -4,6 +4,8 @@ test_transform.py
 Tests for etl/transform.py validation logic — no database needed.
 
 Run:  pytest tests/test_transform.py -v
+
+Day 11: added validation tests for team and game cleaning logic.
 """
 
 import sys

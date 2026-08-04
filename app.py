@@ -1,3 +1,4 @@
+# Day 12: Deployment - Flask web app for the NBA AI Assistant (hosted on Railway)
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
